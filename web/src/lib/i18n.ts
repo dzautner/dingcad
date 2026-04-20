@@ -534,6 +534,7 @@ const translations = {
       projectNotFoundMessage: 'Tama projekti on voitu poistaa tai linkki on virheellinen.',
       connectionLost: 'Yhteys katkesi. Yritetaan uudelleen...',
       reconnected: 'Yhteys palautettu',
+      retryNow: 'Yrita nyt',
     },
   },
   en: {
@@ -1069,6 +1070,7 @@ const translations = {
       projectNotFoundMessage: 'This project may have been deleted or the link is incorrect.',
       connectionLost: 'Connection lost. Retrying...',
       reconnected: 'Reconnected',
+      retryNow: 'Retry now',
     },
   },
 } as const;
