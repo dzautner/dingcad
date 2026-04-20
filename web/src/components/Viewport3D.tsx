@@ -284,6 +284,7 @@ export default function Viewport3D({
   const sceneBoundsRef = useRef<{ center: THREE.Vector3; size: number } | null>(null);
   const [contextMenuPos, setContextMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [isComputing, setIsComputing] = useState(false);
+  const [tessProgress, setTessProgress] = useState<{ current: number; total: number } | null>(null);
   const updateIdRef = useRef(0);
   const { t } = useTranslation();
 
@@ -454,10 +455,11 @@ export default function Viewport3D({
 
       const thisId = ++updateIdRef.current;
       setIsComputing(true);
+      setTessProgress(null);
 
       // Yield to browser so the spinner renders before heavy WASM work
       await new Promise((r) => setTimeout(r, 0));
-      if (thisId !== updateIdRef.current) { setIsComputing(false); return; }
+      if (thisId !== updateIdRef.current) { setIsComputing(false); setTessProgress(null); return; }
 
       // Clear old scene before starting progressive render
       while (group.children.length > 0) {
@@ -475,6 +477,7 @@ export default function Viewport3D({
           }
           addedCount = meshes.length;
           onObjectCount?.(addedCount);
+          setTessProgress({ current: done, total });
         },
       };
 
@@ -495,13 +498,14 @@ export default function Viewport3D({
             group.remove(child);
           }
           const fallback = await evaluateScene(lastValidSceneRef.current);
-          if (thisId !== updateIdRef.current) { setIsComputing(false); return; }
+          if (thisId !== updateIdRef.current) { setIsComputing(false); setTessProgress(null); return; }
           if (!fallback.error) {
             const count = addTessellatedMeshes(group, fallback.meshes, wf);
             onObjectCount?.(count);
           }
         }
         setIsComputing(false);
+        setTessProgress(null);
         return;
       }
 
@@ -510,6 +514,7 @@ export default function Viewport3D({
       onErrorLine?.(null);
       onObjectCount?.(result.meshes.length);
       setIsComputing(false);
+      setTessProgress(null);
 
       const box = new THREE.Box3().setFromObject(group);
       if (!box.isEmpty()) {
@@ -709,25 +714,21 @@ export default function Viewport3D({
         position: "relative",
       }}
     >
-      {isComputing && (
-        <div style={{
-          position: "absolute", inset: 0, display: "flex",
-          alignItems: "center", justifyContent: "center",
-          background: "rgba(0,0,0,0.35)", zIndex: 5,
-          pointerEvents: "none",
-        }}>
-          <div style={{
-            display: "flex", flexDirection: "column", alignItems: "center", gap: 8,
-          }}>
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" style={{ animation: "spin 1s linear infinite" }}>
-              <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
-            </svg>
-            <span style={{ color: "var(--text-secondary)", fontSize: 13, fontFamily: "var(--font-sans)" }}>
-              Computing geometry…
-            </span>
-          </div>
-        </div>
-      )}
+      <div className={`viewport-progress-track${isComputing ? " viewport-progress-visible" : ""}`}>
+        <div
+          className="viewport-progress-bar"
+          style={{
+            width: tessProgress && tessProgress.total > 0
+              ? `${(tessProgress.current / tessProgress.total) * 100}%`
+              : "0%",
+          }}
+        />
+        {tessProgress && tessProgress.total > 0 && (
+          <span className="viewport-progress-label">
+            {tessProgress.current}/{tessProgress.total}
+          </span>
+        )}
+      </div>
       <CameraToolbar
         cameraRef={cameraRef}
         controlsRef={controlsRef}
