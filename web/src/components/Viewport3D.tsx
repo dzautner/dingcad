@@ -3,7 +3,8 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { evaluateScene, initManifold, type TessellatedObject, type EvaluateOptions } from "@/lib/manifold-engine";
+import { type TessellatedObject, type EvaluateOptions } from "@/lib/manifold-engine";
+import { evaluateSceneWorker, initWorker } from "@/lib/manifold-worker-client";
 import { useTranslation } from "@/components/LocaleProvider";
 import ViewportContextMenu, { type ContextMenuItem } from "@/components/ViewportContextMenu";
 import ScreenshotPopover from "@/components/ScreenshotPopover";
@@ -287,9 +288,9 @@ export default function Viewport3D({
   const updateIdRef = useRef(0);
   const { t } = useTranslation();
 
-  // Pre-load Manifold WASM on mount
+  // Pre-load Manifold WASM worker on mount
   useEffect(() => {
-    initManifold().catch(() => {});
+    initWorker().catch(() => {});
   }, []);
 
   // Initialize Three.js scene
@@ -478,7 +479,7 @@ export default function Viewport3D({
         },
       };
 
-      const result = await evaluateScene(script, progressOptions);
+      const result = await evaluateSceneWorker(script, progressOptions);
 
       // Stale update — a newer one has started
       if (thisId !== updateIdRef.current) return;
@@ -494,7 +495,7 @@ export default function Viewport3D({
             disposeObject(child);
             group.remove(child);
           }
-          const fallback = await evaluateScene(lastValidSceneRef.current);
+          const fallback = await evaluateSceneWorker(lastValidSceneRef.current);
           if (thisId !== updateIdRef.current) { setIsComputing(false); return; }
           if (!fallback.error) {
             const count = addTessellatedMeshes(group, fallback.meshes, wf);
