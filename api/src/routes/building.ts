@@ -141,40 +141,68 @@ function loadDemoData(): BuildingData[] {
 const demoBuildings = loadDemoData();
 
 /**
- * Normalize an address string for fuzzy matching:
- * lowercase, collapse whitespace, strip commas and dots.
+ * Normalize an address string for matching:
+ * lowercase (Finnish-locale aware), collapse whitespace, strip commas and dots.
  */
 function normalizeAddress(addr: string): string {
   return addr
-    .toLowerCase()
+    .toLocaleLowerCase("fi")
     .replace(/[,.\-]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
 /**
+ * Extract the street name and house number from a Finnish address string.
+ * Returns null if the pattern cannot be parsed.
+ *
+ * Handles: "Ribbingintie 109-11, 00890 Helsinki" -> { street: "ribbingintie", number: "109" }
+ *          "Uunimaentie 1, 01200 Vantaa"         -> { street: "uunimaentie", number: "1" }
+ */
+function extractStreetAndNumber(normalized: string): { street: string; number: string; suffix?: string } | null {
+  // Strip postal code + city suffix for matching purposes
+  const beforePostal = normalized.split(/\d{5}/)[0].trim();
+  const toMatch = beforePostal || normalized;
+
+  // Match: <street name> <number>[-<suffix>]
+  const m = toMatch.match(/^([a-z\u00e4\u00f6\u00e5]+(?:\s+[a-z\u00e4\u00f6\u00e5]+)*?)\s+(\d+)(?:\s*-\s*(\w+))?/);
+  if (!m) return null;
+
+  return {
+    street: m[1].trim(),
+    number: m[2],
+    suffix: m[3],
+  };
+}
+
+/**
  * Check whether a query address matches a demo address.
- * Matches if the normalized query contains the street name and number.
+ *
+ * Requires both the street name and house number to match exactly
+ * (case-insensitive, Finnish character aware). This prevents false positives
+ * like "Ribbingintie 10" matching "Ribbingintie 109" or a random long
+ * address string accidentally containing a demo street name.
  */
 function matchesDemoAddress(query: string, demoAddress: string): boolean {
   const normQ = normalizeAddress(query);
   const normD = normalizeAddress(demoAddress);
 
-  // Extract the street name and number (first part before postal code)
-  const streetPart = normD.split(/\d{5}/)[0].trim();
-  if (!streetPart) return false;
+  const demoAddr = extractStreetAndNumber(normD);
+  if (!demoAddr) return false;
 
-  // Try exact substring match on the street portion
-  if (normQ.includes(streetPart)) return true;
-
-  // Also try matching just the street name (without house number suffix)
-  const words = streetPart.split(" ");
-  const streetName = words[0];
-  if (streetName && streetName.length > 4 && normQ.includes(streetName)) {
-    return true;
+  const queryAddr = extractStreetAndNumber(normQ);
+  if (!queryAddr) {
+    // If the query cannot be parsed as <street> <number>, no match
+    return false;
   }
 
-  return false;
+  // Street name must match exactly
+  if (queryAddr.street !== demoAddr.street) return false;
+
+  // House number must match exactly (not as substring — "10" != "109")
+  if (queryAddr.number !== demoAddr.number) return false;
+
+  return true;
 }
 
 /**

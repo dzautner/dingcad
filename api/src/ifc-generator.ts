@@ -65,7 +65,12 @@ function stepString(s: string): string {
 }
 
 /** Map a scene variable/material name to an IFC element type. */
-export function classifyElement(name: string, material?: string): IFCSceneObject["type"] {
+export function classifyElement(
+  name: string,
+  material?: string,
+  dimensions?: { x: number; y: number; z: number },
+  position?: { x: number; y: number; z: number },
+): IFCSceneObject["type"] {
   const n = name.toLowerCase();
   if (n.includes("roof") || n.includes("katto")) return "roof";
   if (n.includes("door") || n.includes("ovi") || n.includes("gate") || n.includes("portti")) return "door";
@@ -73,70 +78,131 @@ export function classifyElement(name: string, material?: string): IFCSceneObject
   if (n.includes("floor") || n.includes("slab") || n.includes("deck")
     || n.includes("lattia") || n.includes("laatta") || n.includes("foundation")) return "slab";
   if (n.includes("wall") || n.includes("sein")) return "wall";
+  if (n.includes("beam") || n.includes("palkki") || n.includes("post")
+    || n.includes("pilari") || n.includes("railing") || n.includes("kaide")
+    || n.includes("step") || n.includes("stair") || n.includes("porras")) return "generic";
 
   // Fallback: check material
   const m = (material || "").toLowerCase();
-  if (m.includes("roofing") || m.includes("katto")) return "roof";
+  if (m.includes("roofing") || m.includes("katto") || m.includes("metal")) return "roof";
   if (m.includes("foundation") || m.includes("concrete") || m.includes("betoni")) return "slab";
+  if (m.includes("glass") || m.includes("lasi")) return "window";
 
-  return "wall"; // default to wall for unclassified structural elements
+  // Geometry-based heuristic: thin & tall = wall, thin & flat = slab
+  if (dimensions) {
+    const { x: w, y: h, z: d } = dimensions;
+    const minHorizontal = Math.min(w, d);
+    const maxHorizontal = Math.max(w, d);
+    // Thin vertically and large horizontally = slab/floor
+    if (h <= 0.3 && maxHorizontal >= 1.0 && minHorizontal >= 1.0) return "slab";
+    // Thin in one horizontal dimension and tall = wall
+    if (h > 1.0 && (minHorizontal <= 0.3)) return "wall";
+  }
+
+  return "generic"; // unknown structural elements — not silently classified as wall
+}
+
+/** Number pattern that matches both integers (4) and floats (4.0, .5) */
+const NUM = String.raw`\d+(?:\.\d+)?|\.\d+`;
+
+/** Strip single-line (//) and multi-line (/* *​/) comments from source. */
+function stripComments(src: string): string {
+  return src.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
+/**
+ * Resolve simple `const <name> = <number>;` variable references.
+ */
+function resolveNumericVars(src: string): Map<string, number> {
+  const vars = new Map<string, number>();
+  const re = /(?:const|let|var)\s+(\w+)\s*=\s*(-?\d+(?:\.\d+)?)\s*;/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src)) !== null) {
+    vars.set(m[1], parseFloat(m[2]));
+  }
+  return vars;
+}
+
+/**
+ * Parse a comma-separated argument list, resolving numeric literals and
+ * variable references.  Handles trailing commas and arbitrary whitespace.
+ */
+function resolveArgs(raw: string, vars: Map<string, number>): number[] | null {
+  const parts = raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  const nums: number[] = [];
+  for (const part of parts) {
+    if (/^-?\d+(?:\.\d+)?$/.test(part) || /^\.\d+$/.test(part)) {
+      nums.push(parseFloat(part));
+    } else if (vars.has(part)) {
+      nums.push(vars.get(part)!);
+    } else {
+      return null;
+    }
+  }
+  return nums;
 }
 
 /**
  * Parse scene.js source to extract scene objects with their names, dimensions,
  * positions, and material assignments.
+ *
+ * Handles: integer and float args, multiline formatting, comments,
+ * trailing commas, simple variable references, rotate() wrappers,
+ * and let/var in addition to const.
  */
 export function parseSceneObjects(sceneJs: string): IFCSceneObject[] {
   const objects: IFCSceneObject[] = [];
 
-  // Match variable assignments: const <name> = translate(box(...), x, y, z)
-  // or const <name> = box(w, h, d)
-  // Also handles rotate(box(...), ...) wrapped in translate
-  const lines = sceneJs.split("\n");
+  // Pre-process: strip comments, resolve numeric variables, collapse newlines
+  const clean = stripComments(sceneJs);
+  const vars = resolveNumericVars(clean);
+  const collapsed = clean.replace(/\n/g, " ");
+
   const varDims: Map<string, { w: number; h: number; d: number; x: number; y: number; z: number }> = new Map();
 
-  for (const line of lines) {
-    const trimmed = line.trim();
+  // Match: const <name> = translate([rotate(]box(w,h,d)[, ...])], x, y, z)
+  const translateBoxRe = new RegExp(
+    String.raw`(?:const|let|var)\s+(\w+)\s*=\s*translate\(\s*(?:rotate\(\s*)?box\(\s*((?:${NUM}|\w+)(?:\s*,\s*(?:${NUM}|\w+))*)\s*,?\s*\)` +
+    String.raw`(?:\s*,\s*(?:${NUM}|\w+)(?:\s*,\s*(?:${NUM}|\w+))*\s*,?\s*\))?\s*,\s*` +
+    String.raw`((?:-?(?:${NUM})|\w+)(?:\s*,\s*(?:-?(?:${NUM})|\w+))*)\s*,?\s*\)`,
+    "g"
+  );
 
-    // Match: const <name> = translate(box(w,h,d), x, y, z)
-    // Also: const <name> = translate(rotate(box(w,h,d), ...), x, y, z)
-    const translateMatch = trimmed.match(
-      /const\s+(\w+)\s*=\s*translate\s*\((?:rotate\s*\()?box\s*\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*\)(?:\s*,\s*[\d.,-]+\s*\))?\s*,\s*([\d.-]+)\s*,\s*([\d.-]+)\s*,\s*([\d.-]+)\s*\)/
-    );
-    if (translateMatch) {
-      varDims.set(translateMatch[1], {
-        w: parseFloat(translateMatch[2]),
-        h: parseFloat(translateMatch[3]),
-        d: parseFloat(translateMatch[4]),
-        x: parseFloat(translateMatch[5]),
-        y: parseFloat(translateMatch[6]),
-        z: parseFloat(translateMatch[7]),
-      });
-      continue;
-    }
-
-    // Match: const <name> = box(w, h, d)
-    const boxMatch = trimmed.match(
-      /const\s+(\w+)\s*=\s*box\s*\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/
-    );
-    if (boxMatch) {
-      varDims.set(boxMatch[1], {
-        w: parseFloat(boxMatch[2]),
-        h: parseFloat(boxMatch[3]),
-        d: parseFloat(boxMatch[4]),
-        x: 0,
-        y: 0,
-        z: 0,
+  let m: RegExpExecArray | null;
+  while ((m = translateBoxRe.exec(collapsed)) !== null) {
+    const boxArgs = resolveArgs(m[2], vars);
+    const posArgs = resolveArgs(m[3], vars);
+    if (boxArgs && boxArgs.length >= 3 && posArgs && posArgs.length >= 3) {
+      varDims.set(m[1], {
+        w: boxArgs[0], h: boxArgs[1], d: boxArgs[2],
+        x: posArgs[0], y: posArgs[1], z: posArgs[2],
       });
     }
   }
 
-  // Match scene.add calls to pick up material assignments
+  // Match: const <name> = box(w, h, d)
+  const boxRe = new RegExp(
+    String.raw`(?:const|let|var)\s+(\w+)\s*=\s*box\(\s*((?:${NUM}|\w+)(?:\s*,\s*(?:${NUM}|\w+))*)\s*,?\s*\)`,
+    "g"
+  );
+
+  while ((m = boxRe.exec(collapsed)) !== null) {
+    // Skip if already matched by translate()
+    if (varDims.has(m[1])) continue;
+    const args = resolveArgs(m[2], vars);
+    if (args && args.length >= 3) {
+      varDims.set(m[1], {
+        w: args[0], h: args[1], d: args[2],
+        x: 0, y: 0, z: 0,
+      });
+    }
+  }
+
+  // Match scene.add calls to pick up material assignments and emit objects
   const addRegex = /scene\.add\s*\(\s*(\w+)\s*(?:,\s*\{([^}]*)\})?\s*\)/g;
-  let match;
-  while ((match = addRegex.exec(sceneJs)) !== null) {
-    const varName = match[1];
-    const optsStr = match[2] || "";
+  while ((m = addRegex.exec(collapsed)) !== null) {
+    const varName = m[1];
+    const optsStr = m[2] || "";
     const dims = varDims.get(varName);
     if (!dims) continue;
 
@@ -144,13 +210,15 @@ export function parseSceneObjects(sceneJs: string): IFCSceneObject[] {
     const matMatch = optsStr.match(/material\s*:\s*["']([^"']+)["']/);
     const materialStr = matMatch ? matMatch[1] : undefined;
 
-    const elementType = classifyElement(varName, materialStr);
+    const dimensions = { x: dims.w, y: dims.h, z: dims.d };
+    const position = { x: dims.x, y: dims.y, z: dims.z };
+    const elementType = classifyElement(varName, materialStr, dimensions, position);
 
     objects.push({
       name: varName,
       type: elementType,
-      dimensions: { x: dims.w, y: dims.h, z: dims.d },
-      position: { x: dims.x, y: dims.y, z: dims.z },
+      dimensions,
+      position,
       material: materialStr,
     });
   }

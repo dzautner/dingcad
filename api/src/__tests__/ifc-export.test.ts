@@ -267,9 +267,35 @@ describe("classifyElement", () => {
     expect(classifyElement("base", "foundation")).toBe("slab");
   });
 
-  it("defaults to wall for unclassified elements", () => {
-    expect(classifyElement("beam1")).toBe("wall");
-    expect(classifyElement("post1")).toBe("wall");
+  it("classifies beam/post/stair as generic (not wall)", () => {
+    expect(classifyElement("beam1")).toBe("generic");
+    expect(classifyElement("post1")).toBe("generic");
+    expect(classifyElement("stair_step")).toBe("generic");
+    expect(classifyElement("railing")).toBe("generic");
+    expect(classifyElement("palkki")).toBe("generic");
+    expect(classifyElement("pilari_1")).toBe("generic");
+    expect(classifyElement("kaide")).toBe("generic");
+    expect(classifyElement("porras1")).toBe("generic");
+  });
+
+  it("uses geometry heuristic for thin-and-tall as wall", () => {
+    // Thin in z, tall in y => wall
+    expect(classifyElement("element_a", undefined, { x: 4, y: 2.5, z: 0.12 })).toBe("wall");
+  });
+
+  it("uses geometry heuristic for flat-and-wide as slab", () => {
+    // Short y, wide in x and z => slab
+    expect(classifyElement("element_b", undefined, { x: 4, y: 0.2, z: 3 })).toBe("slab");
+  });
+
+  it("uses glass material to classify as window", () => {
+    expect(classifyElement("panel1", "glass")).toBe("window");
+    expect(classifyElement("paneeli", "lasi")).toBe("window");
+  });
+
+  it("returns generic for truly unknown elements without geometry hint", () => {
+    expect(classifyElement("thing123")).toBe("generic");
+    expect(classifyElement("abc")).toBe("generic");
   });
 });
 
@@ -349,5 +375,125 @@ scene.add(wall1, { material: "lumber" });
     expect(ifcContent).toContain("Pihasauna");
     expect(ifcContent).toContain("IFCWALL");
     expect(ifcContent).toContain("IFCSLAB");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. Parser robustness — parseSceneObjects handles real-world formatting
+// ---------------------------------------------------------------------------
+describe("parseSceneObjects — robustness", () => {
+  it("parses integer arguments in box()", () => {
+    const sceneJs = `
+const wall1 = translate(box(4, 2, 0.12), 0, 1, 0);
+scene.add(wall1, { material: "lumber" });
+`;
+    const objects = parseSceneObjects(sceneJs);
+    expect(objects).toHaveLength(1);
+    expect(objects[0].dimensions).toEqual({ x: 4, y: 2, z: 0.12 });
+    expect(objects[0].position).toEqual({ x: 0, y: 1, z: 0 });
+  });
+
+  it("parses multiline box() and translate() calls", () => {
+    const sceneJs = `
+const wall1 = translate(
+  box(
+    4.0,
+    2.5,
+    0.12
+  ),
+  0,
+  1.25,
+  0
+);
+scene.add(wall1, { material: "lumber" });
+`;
+    const objects = parseSceneObjects(sceneJs);
+    expect(objects).toHaveLength(1);
+    expect(objects[0].dimensions).toEqual({ x: 4.0, y: 2.5, z: 0.12 });
+    expect(objects[0].position).toEqual({ x: 0, y: 1.25, z: 0 });
+  });
+
+  it("strips comments before parsing", () => {
+    const sceneJs = `
+// Main structural wall
+const wall1 = translate(box(4.0, 2.5, 0.12), 0, 1.25, 0); // exterior
+/* This is the floor slab */
+const floor = box(4, 0.2, 3);
+scene.add(wall1, { material: "lumber" });
+scene.add(floor, { material: "foundation" });
+`;
+    const objects = parseSceneObjects(sceneJs);
+    expect(objects).toHaveLength(2);
+    expect(objects[0].name).toBe("wall1");
+    expect(objects[1].name).toBe("floor");
+  });
+
+  it("resolves simple numeric variable references", () => {
+    const sceneJs = `
+const wallWidth = 4;
+const wallHeight = 2.5;
+const wallDepth = 0.12;
+const wall1 = translate(box(wallWidth, wallHeight, wallDepth), 0, 1.25, 0);
+scene.add(wall1, { material: "lumber" });
+`;
+    const objects = parseSceneObjects(sceneJs);
+    expect(objects).toHaveLength(1);
+    expect(objects[0].dimensions).toEqual({ x: 4, y: 2.5, z: 0.12 });
+  });
+
+  it("handles trailing commas in arguments", () => {
+    const sceneJs = `
+const wall1 = translate(box(4.0, 2.5, 0.12,), 0, 1.25, 0,);
+scene.add(wall1, { material: "lumber" });
+`;
+    const objects = parseSceneObjects(sceneJs);
+    expect(objects).toHaveLength(1);
+    expect(objects[0].dimensions).toEqual({ x: 4.0, y: 2.5, z: 0.12 });
+  });
+
+  it("handles let and var in addition to const", () => {
+    const sceneJs = `
+let wall1 = translate(box(4, 2.5, 0.12), 0, 1.25, 0);
+var floor1 = box(4, 0.2, 3);
+scene.add(wall1, { material: "lumber" });
+scene.add(floor1, { material: "foundation" });
+`;
+    const objects = parseSceneObjects(sceneJs);
+    expect(objects).toHaveLength(2);
+  });
+
+  it("returns empty array for empty scene", () => {
+    expect(parseSceneObjects("")).toEqual([]);
+    expect(parseSceneObjects("// nothing here")).toEqual([]);
+  });
+
+  it("returns empty array for scene with no scene.add() calls", () => {
+    const sceneJs = `
+const wall = translate(box(4, 2.5, 0.12), 0, 1.25, 0);
+`;
+    // No scene.add => nothing emitted
+    expect(parseSceneObjects(sceneJs)).toEqual([]);
+  });
+
+  it("handles negative position values", () => {
+    const sceneJs = `
+const wall = translate(box(4, 2.5, 0.12), -2.0, 1.25, -1.5);
+scene.add(wall, { material: "lumber" });
+`;
+    const objects = parseSceneObjects(sceneJs);
+    expect(objects).toHaveLength(1);
+    expect(objects[0].position).toEqual({ x: -2.0, y: 1.25, z: -1.5 });
+  });
+
+  it("uses IFCBUILDINGELEMENTPROXY for generic elements", () => {
+    const sceneJs = `
+const beam1 = translate(box(4, 0.15, 0.15), 0, 2.5, 0);
+scene.add(beam1, { material: "lumber" });
+`;
+    const ifc = generateIFC({
+      project: { id: "p1", name: "Test", scene_js: sceneJs },
+      bom: [],
+    });
+    expect(ifc).toContain("IFCBUILDINGELEMENTPROXY");
   });
 });

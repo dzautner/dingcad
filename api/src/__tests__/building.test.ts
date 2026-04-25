@@ -509,7 +509,97 @@ describe("GET /building — caching", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. Response shape
+// 6. Address matching robustness
+// ---------------------------------------------------------------------------
+describe("GET /building — address matching robustness", () => {
+  it("does NOT match partial house number (Ribbingintie 10 != Ribbingintie 109)", async () => {
+    const res = await makeRequest(
+      "GET",
+      `/building?address=${encodeURIComponent("Ribbingintie 10, 00890 Helsinki")}`
+    );
+    expect(res.status).toBe(200);
+    const body = res.body as { confidence: string };
+    // Should NOT match demo — "10" is not "109"
+    expect(body.confidence).toBe("estimated");
+  });
+
+  it("does NOT match just the street name without number", async () => {
+    const res = await makeRequest(
+      "GET",
+      `/building?address=${encodeURIComponent("Ribbingintie, 00890 Helsinki")}`
+    );
+    expect(res.status).toBe(200);
+    const body = res.body as { confidence: string };
+    expect(body.confidence).toBe("estimated");
+  });
+
+  it("does NOT match unrelated address containing demo street as substring", async () => {
+    // "Isoribbingintie" contains "Ribbingintie" as substring — should not match
+    const res = await makeRequest(
+      "GET",
+      `/building?address=${encodeURIComponent("Isoribbingintie 109, 00890 Helsinki")}`
+    );
+    expect(res.status).toBe(200);
+    const body = res.body as { confidence: string };
+    expect(body.confidence).toBe("estimated");
+  });
+
+  it("matches demo address with different suffix after number", async () => {
+    // "Ribbingintie 109-11" vs querying "Ribbingintie 109-5" — same house number 109
+    const res = await makeRequest(
+      "GET",
+      `/building?address=${encodeURIComponent("Ribbingintie 109-5, 00890 Helsinki")}`
+    );
+    expect(res.status).toBe(200);
+    const body = res.body as { confidence: string };
+    expect(body.confidence).toBe("verified");
+  });
+
+  it("handles Finnish characters in address (umlauts)", async () => {
+    // Uunimaentie address from demo data
+    const res = await makeRequest(
+      "GET",
+      `/building?address=${encodeURIComponent("Uunimaentie 1, 01200 Vantaa")}`
+    );
+    expect(res.status).toBe(200);
+    const body = res.body as { confidence: string; address: string };
+    expect(body.confidence).toBe("verified");
+    expect(body.address).toContain("Uunimaentie");
+  });
+
+  it("matches case-insensitively for Finnish characters", async () => {
+    const res = await makeRequest(
+      "GET",
+      `/building?address=${encodeURIComponent("UUNIMAENTIE 1")}`
+    );
+    expect(res.status).toBe(200);
+    const body = res.body as { confidence: string };
+    expect(body.confidence).toBe("verified");
+  });
+
+  it("handles extra whitespace in address", async () => {
+    const res = await makeRequest(
+      "GET",
+      `/building?address=${encodeURIComponent("Ribbingintie   109")}`
+    );
+    expect(res.status).toBe(200);
+    const body = res.body as { confidence: string };
+    expect(body.confidence).toBe("verified");
+  });
+
+  it("does NOT match wrong house number for Uunimaentie demo", async () => {
+    const res = await makeRequest(
+      "GET",
+      `/building?address=${encodeURIComponent("Uunimaentie 2, 01200 Vantaa")}`
+    );
+    expect(res.status).toBe(200);
+    const body = res.body as { confidence: string };
+    expect(body.confidence).toBe("estimated");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. Response shape
 // ---------------------------------------------------------------------------
 describe("GET /building — response shape", () => {
   it("includes all required fields in response", async () => {

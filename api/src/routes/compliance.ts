@@ -40,44 +40,148 @@ interface ParsedMesh {
   isSubtract?: boolean;
 }
 
-function parseMeshes(sceneJs: string): ParsedMesh[] {
+/** Number pattern that matches both integers (4) and floats (4.0, .5) */
+const NUM = String.raw`\d+(?:\.\d+)?|\.\d+`;
+
+/** Strip single-line (//) and multi-line (/* *​/) comments from source. */
+function stripComments(src: string): string {
+  return src.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
+/**
+ * Resolve simple `const <name> = <number>;` variable references to their
+ * numeric values.  Returns a map of variable name -> number for use in
+ * argument resolution.
+ */
+function resolveNumericVars(src: string): Map<string, number> {
+  const vars = new Map<string, number>();
+  const re = /(?:const|let|var)\s+(\w+)\s*=\s*(-?\d+(?:\.\d+)?)\s*;/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src)) !== null) {
+    vars.set(m[1], parseFloat(m[2]));
+  }
+  return vars;
+}
+
+/**
+ * Parse a comma-separated argument list, resolving numeric literals and
+ * variable references.  Handles trailing commas and arbitrary whitespace
+ * (including newlines).
+ */
+function resolveArgs(raw: string, vars: Map<string, number>): number[] | null {
+  const parts = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const nums: number[] = [];
+  for (const part of parts) {
+    if (/^-?\d+(?:\.\d+)?$/.test(part) || /^\.\d+$/.test(part)) {
+      nums.push(parseFloat(part));
+    } else if (vars.has(part)) {
+      nums.push(vars.get(part)!);
+    } else {
+      return null; // Unresolvable argument
+    }
+  }
+  return nums;
+}
+
+export interface ParseWarning {
+  type: "unresolved_geometry";
+  message: string;
+  line?: number;
+}
+
+function parseMeshes(sceneJs: string, parseWarnings?: ParseWarning[]): ParsedMesh[] {
   const meshes: ParsedMesh[] = [];
   const meshMap = new Map<string, ParsedMesh>();
 
-  const boxRe = /(?:const|let|var)\s+(\w+)\s*=\s*box\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/g;
+  // Pre-process: strip comments and resolve numeric variables
+  const clean = stripComments(sceneJs);
+  const vars = resolveNumericVars(clean);
+
+  // Collapse newlines so multi-line expressions become single-line for regex
+  const collapsed = clean.replace(/\n/g, " ");
+
+  // --- Match box(...) ---
+  const boxRe = new RegExp(
+    String.raw`(?:const|let|var)\s+(\w+)\s*=\s*box\(\s*((?:${NUM}|\w+)(?:\s*,\s*(?:${NUM}|\w+))*)\s*,?\s*\)`,
+    "g"
+  );
   let m: RegExpExecArray | null;
 
-  while ((m = boxRe.exec(sceneJs)) !== null) {
+  while ((m = boxRe.exec(collapsed)) !== null) {
+    const args = resolveArgs(m[2], vars);
+    if (!args || args.length < 3) {
+      if (parseWarnings) {
+        parseWarnings.push({
+          type: "unresolved_geometry",
+          message: `Could not resolve arguments for box() assigned to '${m[1]}'`,
+        });
+      }
+      continue;
+    }
     const mesh: ParsedMesh = {
       name: m[1],
-      w: parseFloat(m[2]),
-      h: parseFloat(m[3]),
-      d: parseFloat(m[4]),
+      w: args[0],
+      h: args[1],
+      d: args[2],
       x: 0, y: 0, z: 0,
     };
     meshMap.set(mesh.name, mesh);
     meshes.push(mesh);
   }
 
-  const translateBoxRe = /(?:const|let|var)\s+(\w+)\s*=\s*translate\(\s*box\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*\)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)/g;
+  // --- Match translate(box(...), x, y, z) and translate(rotate(box(...), ...), x, y, z) ---
+  const translateBoxRe = new RegExp(
+    String.raw`(?:const|let|var)\s+(\w+)\s*=\s*translate\(\s*(?:rotate\(\s*)?box\(\s*((?:${NUM}|\w+)(?:\s*,\s*(?:${NUM}|\w+))*)\s*,?\s*\)` +
+    String.raw`(?:\s*,\s*(?:${NUM}|\w+)(?:\s*,\s*(?:${NUM}|\w+))*\s*,?\s*\))?\s*,\s*` +
+    String.raw`((?:-?(?:${NUM})|\w+)(?:\s*,\s*(?:-?(?:${NUM})|\w+))*)\s*,?\s*\)`,
+    "g"
+  );
 
-  while ((m = translateBoxRe.exec(sceneJs)) !== null) {
+  while ((m = translateBoxRe.exec(collapsed)) !== null) {
+    const boxArgs = resolveArgs(m[2], vars);
+    const posArgs = resolveArgs(m[3], vars);
+    if (!boxArgs || boxArgs.length < 3 || !posArgs || posArgs.length < 3) {
+      if (parseWarnings) {
+        parseWarnings.push({
+          type: "unresolved_geometry",
+          message: `Could not resolve arguments for translate(box()) assigned to '${m[1]}'`,
+        });
+      }
+      continue;
+    }
     const mesh: ParsedMesh = {
       name: m[1],
-      w: parseFloat(m[2]),
-      h: parseFloat(m[3]),
-      d: parseFloat(m[4]),
-      x: parseFloat(m[5]),
-      y: parseFloat(m[6]),
-      z: parseFloat(m[7]),
+      w: boxArgs[0],
+      h: boxArgs[1],
+      d: boxArgs[2],
+      x: posArgs[0],
+      y: posArgs[1],
+      z: posArgs[2],
     };
     meshMap.set(mesh.name, mesh);
     meshes.push(mesh);
   }
 
+  // --- Catch-all: detect any box() or translate(box()) that we failed to parse ---
+  // This generates warnings for geometry we could see but couldn't resolve.
+  const anyBoxRe = /(?:const|let|var)\s+(\w+)\s*=\s*(?:translate\s*\(\s*(?:rotate\s*\(\s*)?)?box\s*\([^)]*\)/g;
+  while ((m = anyBoxRe.exec(collapsed)) !== null) {
+    const varName = m[1];
+    if (!meshMap.has(varName) && parseWarnings) {
+      parseWarnings.push({
+        type: "unresolved_geometry",
+        message: `Could not resolve arguments for box() assigned to '${varName}'`,
+      });
+    }
+  }
+
+  // --- Match subtract(a, b) to mark cutters ---
   const subtractRe = /(?:const|let|var)\s+(\w+)\s*=\s*subtract\(\s*(\w+)\s*,\s*(\w+)\s*\)/g;
 
-  while ((m = subtractRe.exec(sceneJs)) !== null) {
+  while ((m = subtractRe.exec(collapsed)) !== null) {
     const cutterName = m[3];
     const cutter = meshMap.get(cutterName);
     if (cutter) {
@@ -85,9 +189,10 @@ function parseMeshes(sceneJs: string): ParsedMesh[] {
     }
   }
 
-  const addRe = /scene\.add\(\s*(\w+)\s*,\s*\{[^}]*material:\s*["'](\w+)["'][^}]*\}/g;
+  // --- Match scene.add() for material assignments ---
+  const addRe = /scene\.add\(\s*(\w+)\s*,\s*\{[^}]*material:\s*["']([^"']+)["'][^}]*\}/g;
 
-  while ((m = addRe.exec(sceneJs)) !== null) {
+  while ((m = addRe.exec(collapsed)) !== null) {
     const meshRef = meshMap.get(m[1]);
     if (meshRef) {
       meshRef.material = m[2];
@@ -255,17 +360,23 @@ const RULE_COUNT = ALL_RULES.length;
 export function checkCompliance(
   sceneJs: string,
   buildingInfo?: BuildingInfo
-): ComplianceWarning[] {
-  if (!sceneJs || sceneJs.trim().length === 0) return [];
+): { warnings: ComplianceWarning[]; parseWarnings: ParseWarning[] } {
+  const parseWarnings: ParseWarning[] = [];
 
-  const meshes = parseMeshes(sceneJs);
-  if (meshes.length === 0) return [];
+  if (!sceneJs || sceneJs.trim().length === 0) {
+    return { warnings: [], parseWarnings };
+  }
+
+  const meshes = parseMeshes(sceneJs, parseWarnings);
+  if (meshes.length === 0) {
+    return { warnings: [], parseWarnings };
+  }
 
   const warnings: ComplianceWarning[] = [];
   for (const rule of ALL_RULES) {
     warnings.push(...rule.check(meshes, buildingInfo));
   }
-  return warnings;
+  return { warnings, parseWarnings };
 }
 
 // ---------------------------------------------------------------------------
@@ -286,13 +397,14 @@ router.post("/check", (req, res) => {
     return res.status(400).json({ error: "sceneJs exceeds maximum allowed size (500 KB)" });
   }
 
-  const warnings = checkCompliance(sceneJs, buildingInfo);
+  const { warnings, parseWarnings } = checkCompliance(sceneJs, buildingInfo);
 
   const failedRuleIds = new Set(warnings.map((w) => w.ruleId));
   const passedRules = RULE_COUNT - failedRuleIds.size;
 
   res.json({
     warnings,
+    parseWarnings,
     checkedRules: RULE_COUNT,
     passedRules,
   });

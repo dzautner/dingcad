@@ -35,6 +35,7 @@ vi.mock("../email", () => ({
 }));
 
 import app from "../index";
+import { checkCompliance } from "../routes/compliance";
 
 function authToken(userId = "user-1") {
   return jwt.sign(
@@ -351,5 +352,205 @@ describe("Full scene compliance check", () => {
     // passedRules + failed rules should equal checkedRules
     const failedRuleIds = new Set(warnings.map((w) => w.ruleId));
     expect((res.body.passedRules as number) + failedRuleIds.size).toBe(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Parser robustness — direct checkCompliance tests
+// ---------------------------------------------------------------------------
+
+describe("Parser robustness — integer arguments", () => {
+  it("parses box() with integer arguments", () => {
+    const scene = `
+      const wall = translate(box(4, 2, 0.12), 0, 1, 0);
+      scene.add(wall, { material: "lumber" });
+    `;
+    const { warnings } = checkCompliance(scene, { type: "omakotitalo" });
+    // wall height = 2m, below 2.5m min -> should flag
+    const rule = warnings.find((w) => w.ruleId === "FI-RakMK-G1-2.1");
+    expect(rule).toBeDefined();
+    expect((rule!.params as Record<string, number>).height).toBe(2000);
+  });
+
+  it("parses box() with all-integer dimensions", () => {
+    const scene = `
+      const floor = box(4, 1, 3);
+      scene.add(floor, { material: "foundation" });
+    `;
+    const { warnings } = checkCompliance(scene);
+    // 4x3 = 12m2, passes 7m2 min
+    const rule = warnings.find((w) => w.ruleId === "FI-RakMK-G1-2.2");
+    expect(rule).toBeUndefined();
+  });
+});
+
+describe("Parser robustness — multiline formatting", () => {
+  it("parses box() call split across multiple lines", () => {
+    const scene = `
+      const wall = translate(
+        box(
+          4.0,
+          2.2,
+          0.12
+        ),
+        0,
+        1.1,
+        0
+      );
+      scene.add(wall, { material: "lumber" });
+    `;
+    const { warnings } = checkCompliance(scene, { type: "omakotitalo" });
+    const rule = warnings.find((w) => w.ruleId === "FI-RakMK-G1-2.1");
+    expect(rule).toBeDefined();
+    expect((rule!.params as Record<string, number>).height).toBe(2200);
+  });
+
+  it("parses scene.add() split across multiple lines", () => {
+    const scene = `
+      const wall = translate(box(4, 2.2, 0.12), 0, 1.1, 0);
+      scene.add(
+        wall,
+        {
+          material: "lumber",
+          color: [0.8, 0.7, 0.5]
+        }
+      );
+    `;
+    const { warnings } = checkCompliance(scene, { type: "omakotitalo" });
+    const rule = warnings.find((w) => w.ruleId === "FI-RakMK-G1-2.1");
+    expect(rule).toBeDefined();
+  });
+});
+
+describe("Parser robustness — comments in source", () => {
+  it("ignores single-line comments in arguments", () => {
+    const scene = `
+      // Wall definition
+      const wall = translate(box(4, 2.2, 0.12), 0, 1.1, 0); // short wall
+      scene.add(wall, { material: "lumber" });
+    `;
+    const { warnings } = checkCompliance(scene, { type: "omakotitalo" });
+    const rule = warnings.find((w) => w.ruleId === "FI-RakMK-G1-2.1");
+    expect(rule).toBeDefined();
+  });
+
+  it("ignores multi-line comments", () => {
+    const scene = `
+      /* This is the main wall */
+      const wall = translate(box(4, 2.2, 0.12), 0, 1.1, 0);
+      scene.add(wall, { material: "lumber" });
+    `;
+    const { warnings } = checkCompliance(scene, { type: "omakotitalo" });
+    const rule = warnings.find((w) => w.ruleId === "FI-RakMK-G1-2.1");
+    expect(rule).toBeDefined();
+  });
+});
+
+describe("Parser robustness — trailing commas", () => {
+  it("handles trailing comma in box() arguments", () => {
+    const scene = `
+      const wall = translate(box(4, 2.2, 0.12,), 0, 1.1, 0,);
+      scene.add(wall, { material: "lumber" });
+    `;
+    const { warnings } = checkCompliance(scene, { type: "omakotitalo" });
+    const rule = warnings.find((w) => w.ruleId === "FI-RakMK-G1-2.1");
+    expect(rule).toBeDefined();
+    expect((rule!.params as Record<string, number>).height).toBe(2200);
+  });
+});
+
+describe("Parser robustness — variable references", () => {
+  it("resolves simple numeric variable references in box()", () => {
+    const scene = `
+      const w = 4;
+      const h = 2.2;
+      const d = 0.12;
+      const wall = translate(box(w, h, d), 0, 1.1, 0);
+      scene.add(wall, { material: "lumber" });
+    `;
+    const { warnings } = checkCompliance(scene, { type: "omakotitalo" });
+    const rule = warnings.find((w) => w.ruleId === "FI-RakMK-G1-2.1");
+    expect(rule).toBeDefined();
+    expect((rule!.params as Record<string, number>).height).toBe(2200);
+  });
+
+  it("emits parse warning for unresolvable variable references", () => {
+    const scene = `
+      const wall = translate(box(getWidth(), 2.2, 0.12), 0, 1.1, 0);
+      scene.add(wall, { material: "lumber" });
+    `;
+    const { warnings, parseWarnings } = checkCompliance(scene, { type: "omakotitalo" });
+    // Cannot resolve getWidth() — should not produce false compliance warnings
+    expect(parseWarnings.length).toBeGreaterThan(0);
+    expect(parseWarnings[0].type).toBe("unresolved_geometry");
+    expect(parseWarnings[0].message).toContain("wall");
+  });
+});
+
+describe("Parser robustness — let/var declarations", () => {
+  it("parses let declarations", () => {
+    const scene = `
+      let wall = translate(box(4, 2.2, 0.12), 0, 1.1, 0);
+      scene.add(wall, { material: "lumber" });
+    `;
+    const { warnings } = checkCompliance(scene, { type: "omakotitalo" });
+    const rule = warnings.find((w) => w.ruleId === "FI-RakMK-G1-2.1");
+    expect(rule).toBeDefined();
+  });
+
+  it("parses var declarations", () => {
+    const scene = `
+      var wall = translate(box(4, 2.2, 0.12), 0, 1.1, 0);
+      scene.add(wall, { material: "lumber" });
+    `;
+    const { warnings } = checkCompliance(scene, { type: "omakotitalo" });
+    const rule = warnings.find((w) => w.ruleId === "FI-RakMK-G1-2.1");
+    expect(rule).toBeDefined();
+  });
+});
+
+describe("Parser robustness — edge cases", () => {
+  it("returns empty for empty string", () => {
+    const { warnings, parseWarnings } = checkCompliance("");
+    expect(warnings).toEqual([]);
+    expect(parseWarnings).toEqual([]);
+  });
+
+  it("returns empty for whitespace-only scene", () => {
+    const { warnings } = checkCompliance("   \n  \n  ");
+    expect(warnings).toEqual([]);
+  });
+
+  it("returns empty for scene with no geometry (only comments)", () => {
+    const { warnings } = checkCompliance("// just a comment\n/* block */");
+    expect(warnings).toEqual([]);
+  });
+
+  it("returns parseWarnings in API response", async () => {
+    const scene = `
+      const wall = translate(box(computedWidth, 2.2, 0.12), 0, 1.1, 0);
+      scene.add(wall, { material: "lumber" });
+    `;
+    const res = await makeRequest("POST", "/compliance/check", {
+      body: { sceneJs: scene },
+    });
+    expect(res.status).toBe(200);
+    const parseWarnings = res.body.parseWarnings as Array<Record<string, unknown>>;
+    expect(parseWarnings).toBeDefined();
+    expect(parseWarnings.length).toBeGreaterThan(0);
+  });
+
+  it("handles mixed integer and float args in same scene", () => {
+    const scene = `
+      const floor = box(4, 0.15, 3);
+      const wall = translate(box(4, 2, 0.12), 0, 1, 0);
+      scene.add(floor, { material: "foundation" });
+      scene.add(wall, { material: "lumber" });
+    `;
+    const { warnings } = checkCompliance(scene, { type: "omakotitalo" });
+    // Both should be parsed — wall at 2m triggers ceiling height
+    const ceiling = warnings.find((w) => w.ruleId === "FI-RakMK-G1-2.1");
+    expect(ceiling).toBeDefined();
+    expect((ceiling!.params as Record<string, number>).height).toBe(2000);
   });
 });
