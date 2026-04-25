@@ -54,8 +54,11 @@ router.get("/:materialId", requireAuth, requirePermission("material:read"), asyn
 router.get("/project/:projectId", requireAuth, requirePermission("project:read_own"), async (req, res) => {
   const { projectId } = req.params;
 
-  // Verify project exists
-  const projResult = await query("SELECT id FROM projects WHERE id = $1", [projectId]);
+  // Verify project exists AND belongs to the requesting user (or user is admin)
+  const isAdmin = req.user!.role === "admin";
+  const projResult = isAdmin
+    ? await query("SELECT id FROM projects WHERE id = $1", [projectId])
+    : await query("SELECT id FROM projects WHERE id = $1 AND user_id = $2", [projectId, req.user!.id]);
   if (projResult.rows.length === 0) {
     return res.status(404).json({ error: "Project not found" });
   }

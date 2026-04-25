@@ -96,7 +96,7 @@ function extractUserId(req: express.Request): string | null {
   const header = req.headers.authorization;
   if (!header?.startsWith("Bearer ")) return null;
   try {
-    const decoded = jwt.verify(header.slice(7), JWT_SECRET) as AuthUser;
+    const decoded = jwt.verify(header.slice(7), JWT_SECRET, { algorithms: ["HS256"] }) as AuthUser;
     return decoded.id || null;
   } catch {
     return null;
@@ -931,6 +931,16 @@ app.get("/categories", publicLimiter, async (_req, res) => {
 
 app.get("/bom/export/:projectId", authenticatedLimiter, requireAuth, async (req, res) => {
   const { query: dbQuery } = await import("./db");
+
+  // Verify the project belongs to the requesting user (or user is admin)
+  const isAdmin = req.user!.role === "admin";
+  const ownerCheck = isAdmin
+    ? await dbQuery("SELECT id FROM projects WHERE id = $1", [req.params.projectId])
+    : await dbQuery("SELECT id FROM projects WHERE id = $1 AND user_id = $2", [req.params.projectId, req.user!.id]);
+  if (ownerCheck.rows.length === 0) {
+    return res.status(404).json({ error: "Project not found" });
+  }
+
   const lang = (req.query.lang as string) || "fi";
   const result = await dbQuery(
     `SELECT m.name, m.name_fi, m.name_en,
