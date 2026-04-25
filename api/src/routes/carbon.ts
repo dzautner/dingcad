@@ -65,8 +65,9 @@ router.get("/calculate", async (req, res) => {
       typeof project.building_info === "string"
         ? JSON.parse(project.building_info)
         : project.building_info;
-    if (info.area && typeof info.area === "number" && info.area > 0) {
-      buildingAreaM2 = info.area;
+    const area = info.area_m2 ?? info.area;
+    if (area && typeof area === "number" && area > 0) {
+      buildingAreaM2 = area;
     }
   }
 
