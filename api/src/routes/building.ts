@@ -180,6 +180,21 @@ function matchesDemoAddress(query: string, demoAddress: string): boolean {
 /**
  * Generate a generic building based on postal code area characteristics.
  */
+function generateBomSuggestion(area: number): BomItem[] {
+  return [
+    { material_id: "pine_48x148_c24", quantity: Math.round(area * 0.6), unit: "jm" },
+    { material_id: "pine_48x98_c24", quantity: Math.round(area * 0.4), unit: "jm" },
+    // osb_9mm: OSB 9mm sheathing sheets (2400x1200 mm = 2.88 m2/sheet; area*0.35 m2 -> sheets)
+    { material_id: "osb_9mm", quantity: Math.ceil(area * 0.35 / 2.88), unit: "sheet" },
+    // insulation_100mm: Mineraalivilla 100mm, priced per sqm
+    { material_id: "insulation_100mm", quantity: Math.round(area * 0.7), unit: "sqm" },
+    // concrete_block: Betoniharkko 200mm, priced per kpl (~13 blocks/m3)
+    { material_id: "concrete_block", quantity: Math.round(area * 0.06 * 13), unit: "kpl" },
+    // galvanized_roofing: Peltikatto Sinkitty (Ruukki), priced per sqm
+    { material_id: "galvanized_roofing", quantity: Math.round(area * 0.55), unit: "sqm" },
+  ];
+}
+
 function generateGenericBuilding(address: string): BuildingData {
   // Try to extract postal code
   const postalMatch = address.match(/\b(\d{5})\b/);
@@ -230,18 +245,7 @@ function generateGenericBuilding(address: string): BuildingData {
       roof_material: "pelti",
     },
     scene_js: generateGenericScene(buildingType, floors, area),
-    bom_suggestion: [
-      { material_id: "pine_48x148_c24", quantity: Math.round(area * 0.6), unit: "jm" },
-      { material_id: "pine_48x98_c24", quantity: Math.round(area * 0.4), unit: "jm" },
-      // osb_9mm: OSB 9mm sheathing sheets (2400×1200 mm ≈ 2.88 m²/sheet; area*0.35 m² → sheets)
-      { material_id: "osb_9mm", quantity: Math.ceil(area * 0.35 / 2.88), unit: "sheet" },
-      // insulation_100mm: Mineraalivilla 100mm, priced per sqm
-      { material_id: "insulation_100mm", quantity: Math.round(area * 0.7), unit: "sqm" },
-      // concrete_block: Betoniharkko 200mm, priced per kpl (~13 blocks/m³)
-      { material_id: "concrete_block", quantity: Math.round(area * 0.06 * 13), unit: "kpl" },
-      // galvanized_roofing: Peltikatto Sinkitty (Ruukki), priced per sqm
-      { material_id: "galvanized_roofing", quantity: Math.round(area * 0.55), unit: "sqm" },
-    ],
+    bom_suggestion: generateBomSuggestion(area),
   };
 }
 
@@ -488,8 +492,23 @@ function collectPositions(value: unknown, out: number[][] = []): number[][] {
   return out;
 }
 
+function deduplicateClosingPoints(positions: number[][]): number[][] {
+  if (positions.length < 2) return positions;
+
+  // GeoJSON polygon rings repeat the first coordinate as the last point.
+  // Remove the duplicate closing point to avoid biasing the centroid.
+  const first = positions[0];
+  const last = positions[positions.length - 1];
+  if (first[0] === last[0] && first[1] === last[1]) {
+    return positions.slice(0, -1);
+  }
+
+  return positions;
+}
+
 function pointFromGeometry(geometry?: RegistryFeature["geometry"]): { lat: number; lon: number } | null {
-  const positions = collectPositions(geometry?.coordinates);
+  const raw = collectPositions(geometry?.coordinates);
+  const positions = deduplicateClosingPoints(raw);
   if (positions.length === 0) return null;
 
   const sum = positions.reduce(
@@ -679,6 +698,7 @@ function mapRegistryBuilding(
     climate_zone: climate.climate_zone,
     heating_degree_days: climate.heating_degree_days,
     scene_js: generateGenericScene(type, roundedFloors, roundedArea),
+    bom_suggestion: generateBomSuggestion(roundedArea),
     confidence: "verified",
     data_sources: dataSources,
   };
